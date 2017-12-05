@@ -264,7 +264,7 @@ void loop() {
   }
 
   // Read the first line of the request
-  String cmd = client.readStringUntil('\r');
+  String cmd = client.readStringUntil('\n');
   cmd.replace("\n", "");
   cmd.replace("\r", "");
   Serial.println(cmd);
