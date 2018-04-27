@@ -17,14 +17,7 @@
 void ReadSensors();
 void DiscoverSensors();
 
-int pirPin = 4;    //the digital pin connected to the PIR sensor's output
-int relayPin = 5;
 
-int Light = 0;
-boolean activeMotion = 0;
-unsigned long lastMotion = 0;
-boolean newMotion = 0;
-int MotionTimeout = 15000;
 
 
 #define ONE_WIRE_BUS 2  // One wire pin with a 4.7k resistor
@@ -33,8 +26,9 @@ OneWire oneWire(ONE_WIRE_BUS);
 DallasTemperature sensors(&oneWire);
 
 
-WiFiServer server(10050);
-WiFiClient client;
+WiFiServer AgentServer(10050);
+
+
 const char* ssid = "SSID";
 const char* password = "APPASSWORD";
 const String hostname = "HOSTNAME";
@@ -87,18 +81,6 @@ void DiscoverSensors(){
 
 }
 
-void checkMotion() {
-    if(digitalRead(pirPin) == HIGH){
-      Serial.println("Motion");
-      activeMotion = 1;
-      newMotion = 1;
-      lastMotion = millis();
-    }else if(digitalRead(pirPin) == LOW){
-      activeMotion = 0;
-    }
-
-}
-
 
 
 void ReadSensors() {
@@ -123,7 +105,7 @@ void ReadSensors() {
 
 
 //Commands received by agent on port 10050 parsing
-void parseCommand(String cmd) {
+void parseCommand(String cmd,WiFiClient serverClient) {
 
   if (cmd.equals("")) {
 
@@ -138,90 +120,86 @@ void parseCommand(String cmd) {
       Serial.print("Response: ");
       // AGENT.PING
       if(cmd.equals("agent.ping")) {
-          client.println("1");
+          serverClient.println("1");
           Serial.println("1");
         // AGENT.VERSION
        } else if(cmd.equals("agent.version")) {
-          client.println("Sensor.IM 1.0");
+          serverClient.println("Sensor.IM 1.0");
           Serial.println("Sensor.IM 1.0");
       } else if(cmd.equals("agent.uptime")) {
-          client.println(millis() / 1000);
+          serverClient.println(millis() / 1000);
           Serial.println(millis() / 1000);
       } else if(cmd.equals("agent.hostname")) {
-          client.println(hostname);
+          serverClient.println(hostname);
           Serial.println(hostname);
       // TEMP READ
-      //temp.read[2810b4c50600007c]
-      //123456789012345678901234567
-      } else if(cmd.startsWith("temp.read")) {
-          if (cmd.length() == 27) {
-            String uid = cmd.substring(10,26);
+      //temp.sensors.read[2810b4c50600007c]
+      //12345678901234567890123456789012345
+      } else if(cmd.startsWith("temp.sensors.read")) {
+          if (cmd.length() == 17+16+2) {
+            String uid = cmd.substring(18,34);
             boolean found = 0;
             for(int i=0;i<numberOfDevices; i++) {
               if(readings[i].ref == uid) {
-                client.println(readings[i].temp);
+                serverClient.println(readings[i].temp);
                 Serial.println(readings[i].temp);
                 found = 1;
               }
             }
             if (!found) {
-              client.println("UNKNOWN SENSOR:" + uid);
+              serverClient.println("UNKNOWN SENSOR:" + uid);
               Serial.println("UNKNOWN SENSOR:" + uid);
             }
           } else {
-              client.println("ZBXDZBX_NOTSUPPORTED");
+              serverClient.println("ZBXDZBX_NOTSUPPORTED");
               Serial.println("ZBXDZBX_NOTSUPPORTED");
           }
       // SENSOR LIST
-      } else if(cmd.equals("sensors.count")) {
-          client.println(numberOfDevices);
+      } else if(cmd.equals("temp.sensors.count")) {
+          serverClient.println(numberOfDevices);
           Serial.println(numberOfDevices);
-      } else if(cmd.equals("sensors.serials")) {
+      } else if(cmd.equals("temp.sensors.discover")) {
         DiscoverSensors();
+        String sbuff ="";
+        sbuff += "{";
+        sbuff += "\"data\":[";
         for(int i=0;i<numberOfDevices; i++) {
-          client.println(readings[i].ref);
-          Serial.println(readings[i].ref);
+          sbuff += "{";
+          sbuff += "\"{#SERIAL}\":\"";
+          sbuff += readings[i].ref;
+          sbuff += "\"";
+          sbuff += "},";
         }
-      } else if(cmd.equals("sensors.temps")) {
+        int len = sbuff.length() - 1;
+        sbuff.remove(len);
+        sbuff += "]}";
+        serverClient.println(sbuff);
+        Serial.println(sbuff);
+
+        
+      } else if(cmd.equals("temp.sensors.temps")) {
         DiscoverSensors();
+        String sbuff ="";
+        
         for(int i=0;i<numberOfDevices; i++) {
-          client.println(readings[i].temp);
-          Serial.println(readings[i].temp);
+          sbuff += readings[i].ref;
+          sbuff.concat(readings[i].temp);
+          sbuff +=  "\n";
         }
-      }else if(cmd.equals("light.on")) {
-        Light = 2;
-      }else if(cmd.equals("light.off")) {
-        Light = -1;
-      }else if(cmd.equals("light.auto")) {
-        Light = 0;
-      }else if(cmd.equals("light.state")) {
-        client.println(Light);
-        Serial.println(Light);
-      }else if(cmd.equals("motion.now")) {
-        client.println(activeMotion);
-        Serial.println(activeMotion);
-      }else if(cmd.equals("motion.new")) {
-          client.println(newMotion);
-          Serial.println(newMotion);
-          newMotion = 0;
-      }else if(cmd.equals("motion.age")) {
-          int diff = (millis() - lastMotion) / 1000;
-          client.println(diff);
-          Serial.println(diff);
-          newMotion = 0;
+        serverClient.print(sbuff);
+        Serial.print(sbuff);
       // NOT SUPPORTED
       } else {
-        //server.println("ZBXDZBX_NOTSUPPORTED");
-        client.print("UNKNOWN CMD:");
-        client.println(cmd);
+        //AgentServer.println("ZBXDZBX_NOTSUPPORTED");
+        serverClient.print("UNKNOWN CMD:");
+        serverClient.println(cmd);
 
       }
       cmd = "";
 
 
   }
-  client.flush();
-  client.stop();
+
 
 }
 
@@ -233,44 +211,48 @@ void parseCommand(String cmd) {
 
 void loop() {
   ReadSensors();
-  checkMotion();
 
 
-  //-1 Hard Off
-  //+2 Hard On
-  if (Light<=1 && Light >=0) {
-      if (millis() - lastMotion < MotionTimeout) {
-        Light=1;
-      } else {
-        Light=0;
+  //Must be declared Inside Loop as gets destroyed
+  WiFiClient serverClient;
+
+
+  // look for Client connect trial
+  if (AgentServer.hasClient()) {
+    if (!serverClient || !serverClient.connected()) {
+      if (serverClient) {
+        serverClient.stop();
+        Serial.println("Client Stop");
       }
-  }
-  if (Light>0) {
-      digitalWrite(relayPin, LOW);
-  }else{
-    digitalWrite(relayPin, HIGH);
+      serverClient = AgentServer.available();
+      Serial.println("New client");
+      //serverClient.flush();  // clear input buffer, else you get strange characters 
+    }
   }
 
-  // Check if a client has connected
-  client = server.available();
-  if (!client) {
+  
+  if (!serverClient) {
     return;
   }
 
   // Wait until the client sends some data
   Serial.println("new client");
-  while(!client.available()){
+  while(!serverClient.available()){
     delay(1);
   }
 
   // Read the first line of the request
-  String cmd = client.readStringUntil('\n');
+  String cmd = serverClient.readStringUntil('\n');
   cmd.replace("\n", "");
   cmd.replace("\r", "");
   Serial.println(cmd);
-  parseCommand(cmd);
-  client.flush();
-
+  parseCommand(cmd,serverClient);
+  serverClient.flush();
+  delay(10);
+  Serial.println("Closing Connection");
+  serverClient.stop();
+  
+  
 
 
 
@@ -282,13 +264,6 @@ void loop() {
 void setup() {
 
   Serial.begin(115200);
-
-  pinMode(pirPin, INPUT);
-  pinMode(relayPin, OUTPUT);
-
-  digitalWrite(pirPin, LOW);
-  digitalWrite(relayPin, HIGH);
-
 
   WiFi.begin(ssid, password);
   Serial.println("");
@@ -303,8 +278,8 @@ void setup() {
   Serial.println(ssid);
   Serial.print("IP address: ");
   Serial.println(WiFi.localIP());
-  server.begin();
-  server.setNoDelay(true);
+  AgentServer.begin();
+  AgentServer.setNoDelay(true);
   Serial.println("Looking for sensors...");
    // Start up the library
    sensors.begin();
